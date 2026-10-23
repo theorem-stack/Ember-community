@@ -1,10 +1,11 @@
 import random
 import numpy as np
 import torch
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from AI.FirefighterEnvironment import FirefighterEnvironment
 from AI.OptionCriticAgent import OptionCriticAgent, save_config_to_file, save_checkpoint
 from QuicFire.QuicFireConstants import QuicFireConstants
+from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection
 from QuicFire.QuicFireEnvGenerator import ClimateConditions
 
@@ -391,10 +392,13 @@ def replace_bad_seed(elo_manager, bad_seed, pool_generation_seed_counter) -> int
 
 # =====================================================================
 # Main Training Orchestrator Function
-def train_firefighter_agent_with_curriculum(base_env_config: Dict, climate: ClimateConditions) -> None:
+def train_firefighter_agent_with_curriculum(base_env_config: Dict, climate: ClimateConditions, tuning: Optional[Dict] = None) -> None:
     """
     Main training loop for firefighter RL agent using Option-Critic with Elo-based curriculum.
     """
+    # Apply before create_training_environment divides total_time by DT.
+    if tuning:
+        apply_tuning(tuning)
 
     # --- QuicFireConstants for the overall curriculum ---
     BURN_IN_EPISODES = QuicFireConstants.BURN_IN_EPISODES

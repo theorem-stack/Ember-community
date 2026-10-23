@@ -33,7 +33,7 @@ class QuicFireConstants:
     T_FIRE = 1000.0  # Kelvin (K)
     RHO_AIR = 1.225  # kilograms per cubic meter (kg/m^3)
     C_P = 1005.0  # Joules per kilogram-Kelvin (J/(kg·K)) - Specific Heat Capacity of Air
-    H_SF = 0.5  # meters (m) - Surface Fuel Height (reference)
+    H_SF = 5.0  # meters (m) - Surface Fuel Height (reference)
     HEAT_FLUX = 1000.0  # kilowatts per square meter (kW/m^2)
     KAPPA = 0.4 # Dimensionless - Von Karman constant
     Z0 = 0.1  # meters (m) - Roughness length
@@ -109,13 +109,24 @@ class QuicFireConstants:
         'surface': 1.5, # meters (m)
         'midstory': 10.0 # meters (m)
     }
-    PLUME_CONSTANT = 0.377 # Dimensionless (empirical constant)
-    PLUME_HEIGHT_FACTOR = 0.015 # meters per (kilowatt to the power of PLUME_POWER) (m/kW^PLUME_POWER)
-    PLUME_POWER = 0.6 # Dimensionless
-    # Packet turbulence k. Numerically LAMBDA_EP / LAMBDA_AIR. Drying still reads those two on their own.
-    PLUME_K = 4.0 # Dimensionless
-    PLUME_TILT_SCALE = 1.0 # Dimensionless multiplier on the packet tilt length
-    PLUME_TILT_WIND_FLOOR = 1e-6 # meters per second (m/s) - keeps the tilt formula finite in calm air
+    PLUME_CONSTANT = 0.377 # Dimensionless (empirical constant). Not read by the Briggs/McCaffrey plume.
+    # Briggs / McCaffrey plume. Defaults are the literals the desktop model already used.
+    BRIGGS_RISE_COEFF = 1.6 # Dimensionless (Briggs 1975 bent-over rise)
+    BRIGGS_WIND_THRESHOLD = 0.5 # meters per second (m/s) - calm-air rise below this wind
+    MORTON_RISE_COEFF = 5.0 # Dimensionless (Morton 1956 calm buoyant rise)
+    MCCAFFREY_VELOCITY_COEFF = 1.9 # Dimensionless (McCaffrey 1979 centerline velocity)
+    PLUME_LENGTH_FLOOR = 1.0 # meters (m) - keeps the rise and velocity formulas finite
+    PLUME_MIN_RISE_DIAMETERS = 2.0 # Dimensionless - minimum h_sub, in fire diameters
+    PLUME_MAX_HEIGHT = 1000.0 # meters (m)
+    PLUME_CALM_TILT_FACTOR = 1.1 # Dimensionless - ell / h_sub in calm air
+    PLUME_MAX_TILT_FACTOR = 5.0 # Dimensionless - cap on ell / h_sub
+    PLUME_MAX_VERTICAL_VELOCITY = 50.0 # meters per second (m/s)
+    PLUME_K_BASE = 0.5 # Dimensionless
+    PLUME_K_FROUDE_WEIGHT = 0.5 # Dimensionless
+    PLUME_K_FROUDE_CAP = 2.0 # Dimensionless
+    PLUME_K_SHEAR_WEIGHT = 0.5 # Dimensionless
+    PLUME_K_SHEAR_WIND = 10.0 # meters per second (m/s)
+    PLUME_K_MAX = 2.0 # Dimensionless
     WIND_FIELD_SIZE_LIMIT = 100.0  # Megabytes (MB)
 
 ### ----- Procedural Environment Constants -----

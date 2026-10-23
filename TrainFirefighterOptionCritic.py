@@ -1,18 +1,22 @@
 import os
 import numpy as np
 import torch
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime
 import json
 from AI.FirefighterEnvironment import FirefighterEnvironment
 from AI.OptionCriticAgent import OptionCriticAgent
 from AI.PolicyExporter import PolicyExporter
 from QuicFire.QuicFireConstants import QuicFireConstants
+from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection
 from QuicFire.QuicFireEnvGenerator import ClimateConditions
 
-def main_training(save_path: str = "./Firefighter_Models") -> Dict:
+def main_training(save_path: str = "./Firefighter_Models", tuning: Optional[Dict] = None) -> Dict:
     """Main entry point for training the firefighter RL agent using Option-Critic."""
+    # Apply before total_time / DT inside initialize_environment.
+    if tuning:
+        apply_tuning(tuning)
     # Ensure save path exists
     os.makedirs(save_path, exist_ok=True)
     
@@ -54,18 +58,18 @@ def initialize_environment(config: Dict, climate: ClimateConditions, module_seed
         is_training=True
     )
 
-def initialize_agent(env: FirefighterEnvironment, config_data: Dict, device: torch.device) -> OptionCriticAgent:
+def initialize_agent(env: FirefighterEnvironment, hyperparameters: Dict, device: torch.device) -> OptionCriticAgent:
     """Initializes the OptionCriticAgent with the environment and hyperparameters."""
     return OptionCriticAgent(
         env,
         policy_net=None,
-        learning_rate=config_data.get('learning_rate', 3e-4),
-        gamma=config_data.get('gamma', 0.99),
-        entropy_beta=config_data.get('entropy_beta', 0.01),
-        termination_beta=config_data.get('termination_beta', 0.01),
-        buffer_capacity=config_data.get('buffer_capacity', 10000),
-        batch_size=config_data.get('batch_size', 64),
-        reward_alpha=config_data.get('reward_alpha', 0.8),
+        learning_rate=hyperparameters.get('learning_rate', 3e-4),
+        gamma=hyperparameters.get('gamma', 0.99),
+        entropy_beta=hyperparameters.get('entropy_beta', 0.01),
+        termination_beta=hyperparameters.get('termination_beta', 0.01),
+        buffer_capacity=hyperparameters.get('buffer_capacity', 10000),
+        batch_size=hyperparameters.get('batch_size', 64),
+        reward_alpha=hyperparameters.get('reward_alpha', QuicFireConstants.DEFAULT_REWARD_ALPHA),
         device=device,
         is_training=True
     )

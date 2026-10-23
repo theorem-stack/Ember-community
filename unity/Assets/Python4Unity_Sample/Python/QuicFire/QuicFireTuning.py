@@ -9,9 +9,17 @@ Call apply_tuning or apply_document before an environment is constructed.
 max_steps is total_time / DT in the training and inference entry points, and
 that division happens before FirefighterEnvironment.__init__.
 
-H_SF is one constant. It is both the surface-fuel height used by ignition and
-the offset in the headset packet rise h_sub = H_SF + PLUME_HEIGHT_FACTOR * Q^PLUME_POWER.
-Tuning it changes both, which matches the single constant the code already had.
+H_SF is the surface-fuel height used by radiative ignition. The plume model
+does not read it. Plume height, length, vertical velocity, and turbulence
+come from the Briggs/McCaffrey formulas in QuicFireEngine._get_xr_plume_dynamics.
+The coefficients of that model are on this allowlist. Their defaults match
+the literals the desktop plume already used.
+
+Packet-only names (PLUME_HEIGHT_FACTOR, PLUME_POWER, PLUME_K,
+PLUME_TILT_SCALE, PLUME_TILT_WIND_FLOOR, plume_rise, plume_k,
+plume_tilt_length) are not constants and are not helpers. A tuning dict that
+still names them is warned and skipped. PLUME_CONSTANT remains on
+QuicFireConstants for older dumps and is not read by the plume.
 
 Saved training JSON dumps every constant, including dicts such as
 SURFACE_HEIGHTS whose keys become strings. apply_document copies only the
@@ -43,12 +51,31 @@ TUNABLE_KEYS = (
     "MOVEMENT_PENALTY",
     "DEFAULT_REWARD_ALPHA",
     "WIN_PERCENT_FUEL_BURNED_OUTSIDE_BB_THRESHOLD",
-    "PLUME_HEIGHT_FACTOR",
-    "PLUME_POWER",
-    "PLUME_K",
-    "PLUME_TILT_SCALE",
-    "PLUME_TILT_WIND_FLOOR",
-    "PLUME_CONSTANT",
+    "BRIGGS_RISE_COEFF",
+    "BRIGGS_WIND_THRESHOLD",
+    "MORTON_RISE_COEFF",
+    "MCCAFFREY_VELOCITY_COEFF",
+    "PLUME_LENGTH_FLOOR",
+    "PLUME_MIN_RISE_DIAMETERS",
+    "PLUME_MAX_HEIGHT",
+    "PLUME_CALM_TILT_FACTOR",
+    "PLUME_MAX_TILT_FACTOR",
+    "PLUME_MAX_VERTICAL_VELOCITY",
+    "PLUME_K_BASE",
+    "PLUME_K_FROUDE_WEIGHT",
+    "PLUME_K_FROUDE_CAP",
+    "PLUME_K_SHEAR_WEIGHT",
+    "PLUME_K_SHEAR_WIND",
+    "PLUME_K_MAX",
+)
+
+# Zero or negative values break a division in the plume formulas or the time step.
+_POSITIVE_KEYS = (
+    "DT",
+    "BRIGGS_RISE_COEFF",
+    "BRIGGS_WIND_THRESHOLD",
+    "PLUME_LENGTH_FLOOR",
+    "PLUME_K_SHEAR_WIND",
 )
 
 _DEFAULTS = {key: getattr(QuicFireConstants, key) for key in TUNABLE_KEYS}
@@ -87,11 +114,8 @@ def apply_tuning(values: Optional[Dict], unknown: str = "warn") -> None:
         except (TypeError, ValueError) as exc:
             print(f"QuicFireTuning: skipping {key}: {exc}")
             continue
-        if key == "DT" and not coerced > 0:
-            print("QuicFireTuning: DT must be positive; keeping the current value")
-            continue
-        if key == "PLUME_TILT_WIND_FLOOR" and not coerced > 0:
-            print("QuicFireTuning: PLUME_TILT_WIND_FLOOR must be positive; keeping the current value")
+        if key in _POSITIVE_KEYS and not coerced > 0:
+            print(f"QuicFireTuning: {key} must be positive; keeping the current value")
             continue
         setattr(QuicFireConstants, key, coerced)
         if key == "DEFAULT_REWARD_ALPHA":
@@ -112,34 +136,6 @@ def apply_document(document: Optional[Dict]) -> None:
     tuning = document.get("tuning")
     if isinstance(tuning, dict):
         apply_tuning(tuning, unknown="warn")
-
-
-def plume_rise(total_heat: float) -> float:
-    """h_sub = H_SF + PLUME_HEIGHT_FACTOR * Q ** PLUME_POWER."""
-    heat = float(total_heat)
-    return (
-        QuicFireConstants.H_SF
-        + QuicFireConstants.PLUME_HEIGHT_FACTOR
-        * (heat ** QuicFireConstants.PLUME_POWER)
-    )
-
-
-def plume_k() -> float:
-    """Packet turbulence factor. Default 4, from LAMBDA_EP / LAMBDA_AIR."""
-    return QuicFireConstants.PLUME_K
-
-
-def plume_tilt_length(h_sub: float, width: float, wind_speed_horizontal: float) -> float:
-    """
-    ell = PLUME_TILT_SCALE * h_sub * (1 + sqrt(1 + width^2 / max(wind^2, floor))).
-    The floor replaces the previous literal 1e-6.
-    """
-    floor = QuicFireConstants.PLUME_TILT_WIND_FLOOR
-    wind2 = float(wind_speed_horizontal) * float(wind_speed_horizontal)
-    if wind2 < floor:
-        wind2 = floor
-    ell = float(h_sub) * (1.0 + (1.0 + (float(width) * float(width)) / wind2) ** 0.5)
-    return ell * QuicFireConstants.PLUME_TILT_SCALE
 
 
 def _coerce(value, default):

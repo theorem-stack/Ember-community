@@ -57,9 +57,9 @@ def visualize_fire_movement(results: Dict, nx: int, ny: int, dx: float = 2.0, dy
                 if 0 <= grid_i < nx and 0 <= grid_j < ny:
                     fire_grid[grid_j, grid_i] += intensity
         
-        # Normalize the fire_grid so that the maximum intensity is 2
+        # Normalize the fire_grid so that the maximum intensity is 1
         if normalize and global_max_intensity > 0:
-            fire_grid = fire_grid / global_max_intensity * 2
+            fire_grid = fire_grid / global_max_intensity
         
         return fire_grid
     
@@ -70,10 +70,10 @@ def visualize_fire_movement(results: Dict, nx: int, ny: int, dx: float = 2.0, dy
         if fire_grid.size > 0:
             all_intensities.append(np.max(fire_grid))
             
-    global_max_intensity = max(all_intensities) if all_intensities else 2.0 
+    global_max_intensity = max(all_intensities) if all_intensities else 1.0 
 
-    # Normalize colormap to 0-2 range
-    norm = Normalize(vmin=0, vmax=2)
+    # Normalize colormap to 0-1 range
+    norm = Normalize(vmin=0, vmax=1)
 
     fire_grid = get_fire_grid(0)
     im = ax1.imshow(fire_grid, origin='lower', extent=extent, cmap='hot', norm=norm)
@@ -120,7 +120,7 @@ def visualize_fire_movement(results: Dict, nx: int, ny: int, dx: float = 2.0, dy
         # Update fire movement plot
         fire_grid = get_fire_grid(frame)
         im.set_data(fire_grid)
-        ax1.set_title(f"Fire Movement with Burn Box")
+        ax1.set_title(f"Fire Movement with Burn Box at t={time_series[frame]['time']:.2f}s")
         
         # Clear existing burn box patch and redraw
         new_patch = None

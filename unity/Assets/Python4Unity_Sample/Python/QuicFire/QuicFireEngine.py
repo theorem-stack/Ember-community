@@ -7,7 +7,7 @@ from QuicFire.QuicFireIgnitionManager import QuicFireIgnitionManager
 from QuicFire.QuicFireWindFieldManager import QuicFireWindFieldManager
 from QuicFire.QuicFireConstants import QuicFireConstants
 from QuicFire.QuicFireEnvGenerator import VegetationType, VEGETATION_PROPERTIES
-from QuicFire.QuicFireTuning import apply_tuning, plume_k, plume_rise, plume_tilt_length
+from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection
 from scipy.ndimage import label # Import for connected components
 
@@ -689,109 +689,109 @@ class QuicFireEngine:
     
     def _get_xr_plume_dynamics(self) -> list[dict]:
         """
-        Identifies distinct fire fronts (plumes) and returns their dynamics parameters
-        for visualization in Unity, suitable for interpolation.
-
-        Returns:
-            A list of dictionaries, where each dictionary represents a single plume
-            and contains its origin, velocity components, height, length, and turbulence factor.
+        Calculate plume dynamics for wildfire clusters using Briggs plume rise and McCaffrey velocity profiles.
+        Returns list of plume dictionaries compatible with Unity shader (PlumeCellData).
         """
-        active_fires_mask = self.active_fire_time > 0
 
+        active_fires_mask = self.active_fire_time > 0
         if not np.any(active_fires_mask):
-            # Return an empty list if no active fires, indicating no plumes
             return []
 
-        # Use scipy.ndimage.label to find connected components (distinct fire fronts)
-        # This efficiently groups adjacent 'True' values in the 3D boolean mask.
         labeled_array, num_features = label(active_fires_mask)
-
         plume_data_list = []
 
-        # Iterate through each identified fire front (feature)
-        # feature_id starts from 1 because 0 is typically the background
         for feature_id in range(1, num_features + 1):
-            # Create a mask for the current cluster
             cluster_mask = (labeled_array == feature_id)
-
-            # Get the 3D indices (i, j, k) of cells belonging to this specific cluster
             i_c, j_c, k_c = np.where(cluster_mask)
 
-            # Skip if the cluster is empty (shouldn't happen with `np.where` but good practice)
             if len(i_c) == 0:
                 continue
 
-            # --- Calculate Plume Origin (Center of Mass) ---
-            # Calculate the mean grid coordinates for the cluster
+            # --- Plume Origin ---
+            # Centroid of fire cluster in grid coordinates, converted to world space
             mean_i = np.mean(i_c)
             mean_j = np.mean(j_c)
-            # For the vertical origin, use the average height of the fire base in the cluster
-            # or a slightly elevated point above the terrain.
-            # Here, we'll use the average height map value at the cluster's base.
-            mean_k_level = np.mean(self.height_map[i_c, j_c]) # Average base height
+            mean_k_level = np.mean(self.height_map[i_c, j_c])
 
-            # Convert grid coordinates to world coordinates for Unity
-            # Assuming self.dx and self.dy are cell dimensions in world units
-            # And z_levels[0] is the base Z-level if height_map is relative to it
             plume_origin_x = mean_i * self.dx
             plume_origin_y = mean_j * self.dy
-            plume_origin_z = mean_k_level # Or adjust based on your world Z-axis convention
+            plume_origin_z = mean_k_level
 
-            # --- Calculate Plume Dynamics Parameters for the Cluster ---
-
-            # Heat release for cells in this cluster
-            heat_release_cluster_cells = self.heat_flux[cluster_mask] * self.dx * self.dy  # kW
-            total_heat_cluster = np.sum(heat_release_cluster_cells) # Total heat for this plume
-
+            # --- Heat Release ---
+            # Total heat (kW) from cluster, integrating heat flux (kW/m²) over area
+            heat_release_cluster_cells = self.heat_flux[cluster_mask] * self.dx * self.dy
+            total_heat_cluster = np.sum(heat_release_cluster_cells)
             if total_heat_cluster <= 0:
-                continue # Skip if no heat for this cluster
+                continue
 
-            # Calculate Q_cell and F_R for this cluster
-            Q_cell_cluster = heat_release_cluster_cells * 1000  # W
-            F_R_cluster = (QuicFireConstants.GRAVITY * Q_cell_cluster) / \
-                        (QuicFireConstants.RHO_AIR * QuicFireConstants.C_P * QuicFireConstants.T_AMBIENT)  # m^4/s^3
+            # --- Fire Geometry ---
+            # Equivalent diameter for plume scaling (McCaffrey 1979, assumes circular source)
+            fire_area = len(i_c) * self.dx * self.dy  # m²
+            fire_diameter = 2 * np.sqrt(fire_area / np.pi)  # m
 
-            # Relative heights for cells in this cluster
-            relative_heights_cluster = self.z_levels[k_c] - self.height_map[i_c, j_c]
+            # --- Buoyancy Flux ---
+            # F = g * Q / (ρ Cp T_amb) in m⁴/s³, where Q is in W (Briggs 1975)
+            Q_total = total_heat_cluster * 1000.0  # Convert kW to W
+            F = QuicFireConstants.GRAVITY * Q_total / (QuicFireConstants.RHO_AIR * QuicFireConstants.C_P * QuicFireConstants.T_AMBIENT)
 
-            # Vertical buoyancy velocity for cells in this cluster
-            w_1_values_cluster = np.sqrt((2/3) * F_R_cluster / np.maximum(0.1, relative_heights_cluster))
-            w_1_mean_cluster = np.mean(w_1_values_cluster) # Mean vertical buoyancy for the plume
+            # --- Wind Speed ---
+            # Mean horizontal wind speed over cluster (for Briggs rise and tilt)
+            wind_speed_cluster = np.sqrt(np.mean(self.wind_manager.wind_u[cluster_mask])**2 +
+                                        np.mean(self.wind_manager.wind_v[cluster_mask])**2)
 
-            # Get wind data for the cells in this cluster
-            wind_u_cluster = self.wind_manager.wind_u[cluster_mask]
-            wind_v_cluster = self.wind_manager.wind_v[cluster_mask]
-            wind_w_cluster = self.wind_manager.wind_w[cluster_mask] # Include vertical wind component
+            # --- Plume Height (h_sub) ---
+            # Briggs neutral atmosphere, bent-over plume: h = coeff * F^{1/3} x^{2/3} / u
+            # Evaluate at x = fire_diameter (near-field rise, typical for visualization)
+            # Ref: Briggs 1975, "Plume Rise Predictions"
+            length_floor = QuicFireConstants.PLUME_LENGTH_FLOOR
+            x_ref = max(fire_diameter, length_floor)  # Avoid div0
+            if wind_speed_cluster > QuicFireConstants.BRIGGS_WIND_THRESHOLD:
+                h_sub_plume = QuicFireConstants.BRIGGS_RISE_COEFF * pow(F, 1.0/3.0) * pow(x_ref, 2.0/3.0) / wind_speed_cluster
+            else:
+                # Low wind: Use buoyant rise ~ F^{2/5} (Morton 1956, simplified)
+                h_sub_plume = QuicFireConstants.MORTON_RISE_COEFF * pow(F, 2.0/5.0)
+            h_sub_plume = max(h_sub_plume, fire_diameter * QuicFireConstants.PLUME_MIN_RISE_DIAMETERS)
+            h_sub_plume = min(h_sub_plume, QuicFireConstants.PLUME_MAX_HEIGHT)
 
-            wind_u_mean_cluster = np.mean(wind_u_cluster)
-            wind_v_mean_cluster = np.mean(wind_v_cluster)
-            wind_w_mean_cluster = np.mean(wind_w_cluster) # Mean vertical wind component
-            
-            # Combined horizontal wind speed for plume length calculation
-            wind_speed_horizontal_mean = np.sqrt(wind_u_mean_cluster**2 + wind_v_mean_cluster**2)
+            # --- Plume Length (ell) ---
+            # Horizontal projection at h_sub: x where h(x) = h_sub
+            # From Briggs: x ≈ (h * u / (coeff * F^{1/3}))^{3/2}
+            if wind_speed_cluster > QuicFireConstants.BRIGGS_WIND_THRESHOLD:
+                ell_plume = pow(h_sub_plume * wind_speed_cluster / (QuicFireConstants.BRIGGS_RISE_COEFF * pow(F, 1.0/3.0)), 1.5)
+                ell_plume = max(ell_plume, h_sub_plume)  # Ensure at least vertical rise
+            else:
+                ell_plume = h_sub_plume * QuicFireConstants.PLUME_CALM_TILT_FACTOR
+            ell_plume = min(ell_plume, h_sub_plume * QuicFireConstants.PLUME_MAX_TILT_FACTOR)
 
-            # Calculate plume width parameter 'w'
-            w_plume_width = QuicFireConstants.PLUME_CONSTANT * total_heat_cluster / max(1, len(i_c))
+            # --- Vertical Velocity (plume_w) ---
+            # Centerline velocity at z = fire_diameter: w ∝ (F / z)^{1/3} (McCaffrey 1979)
+            z_ref = max(fire_diameter, length_floor)
+            w_cl = QuicFireConstants.MCCAFFREY_VELOCITY_COEFF * pow(F / z_ref, 1.0/3.0)
+            w_cl = min(w_cl, QuicFireConstants.PLUME_MAX_VERTICAL_VELOCITY)
 
-            # h_sub = H_SF + PLUME_HEIGHT_FACTOR * Q^PLUME_POWER
-            h_sub_plume = plume_rise(total_heat_cluster)
+            # Wind components (mean over cluster, no double-counting vertical)
+            wind_u_mean_cluster = np.mean(self.wind_manager.wind_u[cluster_mask])
+            wind_v_mean_cluster = np.mean(self.wind_manager.wind_v[cluster_mask])
 
-            # ell = PLUME_TILT_SCALE * h_sub * (1 + sqrt(1 + width^2 / max(wind^2, PLUME_TILT_WIND_FLOOR)))
-            ell_plume = plume_tilt_length(h_sub_plume, w_plume_width, wind_speed_horizontal_mean)
+            # --- Turbulence Factor (k) ---
+            # Scale with Froude number: Fr = w_cl² / (g * fire_diameter)
+            # Base plus buoyancy and wind shear, then capped (Morton 1956)
+            fr = w_cl * w_cl / (QuicFireConstants.GRAVITY * max(fire_diameter, length_floor))
+            k_val_plume = QuicFireConstants.PLUME_K_BASE + QuicFireConstants.PLUME_K_FROUDE_WEIGHT * min(fr, QuicFireConstants.PLUME_K_FROUDE_CAP)
+            shear = wind_speed_cluster / QuicFireConstants.PLUME_K_SHEAR_WIND
+            k_val_plume += QuicFireConstants.PLUME_K_SHEAR_WEIGHT * min(shear, 1.0)
+            k_val_plume = min(k_val_plume, QuicFireConstants.PLUME_K_MAX)
 
-            # Packet turbulence k. Default PLUME_K is LAMBDA_EP / LAMBDA_AIR.
-            k_val_plume = plume_k()
-
-            # Append the calculated parameters for this plume to the list
+            # --- Output ---
             plume_data_list.append({
                 'origin_position': [plume_origin_x, plume_origin_y, plume_origin_z],
-                'plume_u': wind_u_mean_cluster,         # Mean horizontal wind X
-                'plume_v': wind_v_mean_cluster,         # Mean horizontal wind Y
-                'plume_w': w_1_mean_cluster + wind_w_mean_cluster, # Combined vertical velocity (buoyancy + ambient vertical wind)
-                'total_heat': total_heat_cluster,       # For overall plume size/intensity
-                'h_sub': h_sub_plume,                   # Plume height
-                'ell': ell_plume,                       # Plume length/tilt
-                'k': k_val_plume                        # Turbulence factor
+                'plume_u': wind_u_mean_cluster,
+                'plume_v': wind_v_mean_cluster,
+                'plume_w': w_cl,
+                'total_heat': total_heat_cluster,
+                'h_sub': h_sub_plume,
+                'ell': ell_plume,
+                'k': k_val_plume
             })
 
         return plume_data_list

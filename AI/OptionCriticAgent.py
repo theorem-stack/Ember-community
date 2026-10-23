@@ -21,7 +21,7 @@ class OptionCriticAgent:
                  termination_beta: float = 0.01, # Coefficient for termination regularization
                  buffer_capacity: int = 10000,
                  batch_size: int = 64,
-                 reward_alpha: float = 0.8,
+                 reward_alpha: Optional[float] = None,
                  device: torch.device = None,
                  is_training: bool = True
         ):
@@ -32,6 +32,9 @@ class OptionCriticAgent:
         self.entropy_beta = entropy_beta
         self.termination_beta = termination_beta
         self.batch_size = batch_size
+        if reward_alpha is None:
+            from QuicFire.QuicFireConstants import QuicFireConstants
+            reward_alpha = QuicFireConstants.DEFAULT_REWARD_ALPHA
         self.reward_alpha = reward_alpha # Store alpha
         self.verbose = True # Assuming you have a verbose flag
         self.device = device
@@ -200,9 +203,10 @@ class OptionCriticAgent:
         
         # Value Loss (MSE between predicted V and target V)
         value_loss = F.mse_loss(initial_V.squeeze(), target_V.detach())
-        
+
         # Option Policy Loss
         # We need to get the log_prob of the *chosen* option from the initial state's logits.
+        # --- Change 3: Move chosen option indices to device ---
         chosen_option_types = torch.LongTensor([t['chosen_option']['action_type'] for t in batch]).to(self.device)
         chosen_target_x = torch.LongTensor([t['chosen_option']['x'] for t in batch]).to(self.device)
         chosen_target_y = torch.LongTensor([t['chosen_option']['y'] for t in batch]).to(self.device)
@@ -292,7 +296,7 @@ class OptionCriticAgent:
                 self.agent_option_steps[agent_idx] += 1
 
                 if env.option_terminated[agent_idx]:
-                    # Add an explicit check for initial_state validity
+                    # --- CORRECTED: Add an explicit check for initial_state validity ---
                     if self.agent_initial_option_states[agent_idx] is not None:
                         final_state_tensor = torch.FloatTensor(next_state).permute(2, 0, 1).unsqueeze(0).to(self.device)
                         _, _, final_termination_logit, _ = self.policy_net(final_state_tensor)
