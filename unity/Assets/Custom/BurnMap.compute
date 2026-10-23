@@ -1,0 +1,85 @@
+#pragma kernel UpdateBurnMap
+
+// A RW (Read-Write) texture to store the burn map data.
+// R: Burn Intensity, G: Burn Height, B: Burn Progress
+RWTexture2D<float4> BurnMap;
+
+// Shader properties set from the C# script.
+float BurnRadius;
+float DeltaTime;
+uint MapResolution;
+float TerrainWidth;
+float TerrainDepth;
+float MaxHeight;
+
+// Struct to match the data sent from C#.
+struct FireDataGPU
+{
+    float3 position;
+    float intensity;
+    float burnProgress; // Renamed to reflect the C# script change
+};
+
+// A structured buffer to hold the fire data for each frame.
+StructuredBuffer<FireDataGPU> FireData;
+int NumFires;
+
+[numthreads(8,8,1)]
+void UpdateBurnMap (uint3 id : SV_DispatchThreadID)
+{
+    // Ensure thread ID is within the texture bounds.
+    if (id.x >= MapResolution || id.y >= MapResolution)
+    {
+        return;
+    }
+
+    // Get the current burn map values for this pixel.
+    float4 currentBurn = BurnMap[id.xy];
+    float currentIntensity = currentBurn.r;
+    float currentHeight = currentBurn.g;
+    float currentBurnProgress = currentBurn.b;
+
+    // Calculate the world position of the current pixel.
+    float2 worldPos = float2(
+        (float)id.x / MapResolution * TerrainWidth,
+        (float)id.y / MapResolution * TerrainDepth
+    );
+
+    // Initialize new values with the current values.
+    float newIntensity = currentIntensity;
+    float newHeight = currentHeight;
+    float newBurnProgress = currentBurnProgress;
+
+    // Iterate through all fires to calculate their effect on this pixel.
+    for (int i = 0; i < NumFires; i++)
+    {
+        float2 firePosXZ = FireData[i].position.xz;
+        float dist = distance(worldPos, firePosXZ);
+
+        // Check if the current pixel is within the fire's radius.
+        if (dist < BurnRadius)
+        {
+            float proximity = 1.0 - (dist / BurnRadius);
+            
+            // Calculate a new intensity, ensuring it doesn't exceed 1.0.
+            // This logic allows intensity to accumulate.
+            float intensityContribution = proximity * FireData[i].intensity * DeltaTime;
+            float candidateIntensity = min(1.0, currentIntensity + intensityContribution);
+
+            // Update intensity and height if a stronger fire is found.
+            if (candidateIntensity > newIntensity)
+            {
+                newIntensity = candidateIntensity;
+                newHeight = FireData[i].position.y / MaxHeight;
+            }
+
+            // The burn progress should be the maximum burn progress in the area.
+            // This ensures that the dissolve effect is driven by the most burned-out fire
+            // within the radius.
+            newBurnProgress = max(newBurnProgress, FireData[i].burnProgress);
+        }
+    }
+
+    // Write the new values back to the burn map.
+    BurnMap[id.xy] = float4(newIntensity, newHeight, newBurnProgress, 0);
+}

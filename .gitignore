@@ -1,0 +1,30 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Training runs, exported weights, and logs
+Training/
+CurriculumTraining/
+TrainedModels/
+OutputData/
+*.onnx
+*.pt
+*.pth
+*.npy
+*.log
+firefighter_log.txt
+
+# Generated simulation frames and headset dumps
+QuicFire/output/
+UnityVisuals/

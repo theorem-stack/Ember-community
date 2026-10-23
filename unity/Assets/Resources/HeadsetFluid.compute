@@ -1,0 +1,449 @@
+#pragma kernel InitGrid
+#pragma kernel Advect
+#pragma kernel AddForces
+#pragma kernel DiffuseVelocity
+#pragma kernel Divergence
+#pragma kernel PressureJacobi
+#pragma kernel SubtractGradient
+#pragma kernel ClearParticles
+#pragma kernel SpawnParticles
+#pragma kernel AdvectParticles
+
+// Layered 2.5D stable fluids for a Quest-class GPU.
+// The volume is stored as a 2D atlas (width = Res, height = Res * Layers)
+// so every UAV is an RWTexture2D. RWTexture3D is avoided: GLES compute on
+// Quest does not reliably support 3D random-access textures.
+//
+// One step, after C# binds StateRead -> StateWrite and swaps:
+//   1. Advect          semi-Lagrangian backtrace of velocity and heat
+//   2. AddForces       burn-map heat, buoyancy, ambient wind, dissipation
+//   3. DiffuseVelocity Jacobi viscosity, repeated from C#
+//   4. Divergence      div(u)
+//   5. PressureJacobi  laplacian(p) = div(u), repeated from C#
+//   6. SubtractGradient u <- u - grad(p), then solid-wall and speed clamp
+// Particles sample the resulting velocity. They are not a pressure solve.
+
+int Res;
+int Layers;
+float TerrainWidth;
+float TerrainDepth;
+float DomainHeight;
+float DeltaTime;
+float Viscosity;
+float Buoyancy;
+float AmbientTemperature;
+float Dissipation;
+float WindCoupling;
+float HeatSourceStrength;
+float MaxSpeed;
+float4 AmbientWind;
+float HeatEnabled;
+
+int SourceCount;
+int SpawnCount;
+int MaxParticles;
+float ParticleLifetime;
+float ParticleSize;
+int FrameSeed;
+
+RWTexture2D<float4> StateRead;      // xyz velocity (m/s, Unity y-up), w temperature
+RWTexture2D<float4> StateWrite;
+RWTexture2D<float4> PressureRead;
+RWTexture2D<float4> PressureWrite;
+RWTexture2D<float4> DivergenceMap;
+Texture2D<float4> BurnMapTex;
+
+RWTexture2D<float4> ParticlePosAge; // xyz world, w age. Age < 0 is dead.
+RWTexture2D<float4> ParticleAux;    // x lifetime, y size, z heat, w seed
+
+struct PlumeSourceGPU
+{
+    float4 originHeat; // xyz world, w heat in 0..1
+    float4 radiusMisc; // x radius, y h_sub, z packet k, w active
+};
+
+StructuredBuffer<PlumeSourceGPU> Sources;
+
+bool Decode(uint3 id, out int ix, out int iz, out int layer)
+{
+    ix = 0;
+    iz = 0;
+    layer = 0;
+    if (Res <= 1 || Layers <= 0)
+        return false;
+    if (id.x >= (uint)Res || id.y >= (uint)(Res * Layers))
+        return false;
+    layer = (int)id.y / Res;
+    iz = (int)id.y - layer * Res;
+    ix = (int)id.x;
+    return true;
+}
+
+int AtlasRow(int layer, int iz)
+{
+    return layer * Res + iz;
+}
+
+float CellDx()
+{
+    return TerrainWidth / (float)Res;
+}
+
+float CellDz()
+{
+    return TerrainDepth / (float)Res;
+}
+
+float CellDy()
+{
+    return DomainHeight / (float)max(Layers, 1);
+}
+
+float3 CellCenter(int ix, int iz, int layer)
+{
+    return float3((ix + 0.5) * CellDx(), (layer + 0.5) * CellDy(), (iz + 0.5) * CellDz());
+}
+
+float4 LoadState(int ix, int iz, int layer)
+{
+    ix = clamp(ix, 0, Res - 1);
+    iz = clamp(iz, 0, Res - 1);
+    layer = clamp(layer, 0, Layers - 1);
+    return StateRead[int2(ix, AtlasRow(layer, iz))];
+}
+
+float SamplePressure(int ix, int iz, int layer)
+{
+    // Open top: pressure is zero just above the domain (Dirichlet).
+    if (layer >= Layers)
+        return 0.0;
+    // Sides and bottom: Neumann, copy the boundary cell.
+    ix = clamp(ix, 0, Res - 1);
+    iz = clamp(iz, 0, Res - 1);
+    layer = clamp(layer, 0, Layers - 1);
+    return PressureRead[int2(ix, AtlasRow(layer, iz))].x;
+}
+
+float3 ClampDomain(float3 p)
+{
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    p.x = clamp(p.x, 0.5 * dx, TerrainWidth - 0.5 * dx);
+    p.y = clamp(p.y, 0.5 * dy, DomainHeight - 0.5 * dy);
+    p.z = clamp(p.z, 0.5 * dz, TerrainDepth - 0.5 * dz);
+    return p;
+}
+
+// Manual trilinear sample. Hardware filtering would bleed across atlas layers.
+float4 SampleState(float3 world)
+{
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    float fx = world.x / dx - 0.5;
+    float fy = world.y / dy - 0.5;
+    float fz = world.z / dz - 0.5;
+    int x0 = (int)floor(fx);
+    int y0 = (int)floor(fy);
+    int z0 = (int)floor(fz);
+    float tx = frac(fx);
+    float ty = frac(fy);
+    float tz = frac(fz);
+
+    float4 s000 = LoadState(x0,     z0,     y0);
+    float4 s100 = LoadState(x0 + 1, z0,     y0);
+    float4 s001 = LoadState(x0,     z0 + 1, y0);
+    float4 s101 = LoadState(x0 + 1, z0 + 1, y0);
+    float4 s010 = LoadState(x0,     z0,     y0 + 1);
+    float4 s110 = LoadState(x0 + 1, z0,     y0 + 1);
+    float4 s011 = LoadState(x0,     z0 + 1, y0 + 1);
+    float4 s111 = LoadState(x0 + 1, z0 + 1, y0 + 1);
+
+    float4 s00 = lerp(s000, s100, tx);
+    float4 s01 = lerp(s001, s101, tx);
+    float4 s10 = lerp(s010, s110, tx);
+    float4 s11 = lerp(s011, s111, tx);
+    float4 s0 = lerp(s00, s01, tz);
+    float4 s1 = lerp(s10, s11, tz);
+    return lerp(s0, s1, ty);
+}
+
+float SampleBurn(float2 worldXZ)
+{
+    uint bw, bh;
+    BurnMapTex.GetDimensions(bw, bh);
+    if (bw == 0 || bh == 0 || TerrainWidth <= 0.0 || TerrainDepth <= 0.0)
+        return 0.0;
+    float u = worldXZ.x / TerrainWidth * (float)bw - 0.5;
+    float v = worldXZ.y / TerrainDepth * (float)bh - 0.5;
+    int x0 = (int)floor(u);
+    int y0 = (int)floor(v);
+    float tx = frac(u);
+    float ty = frac(v);
+    int x1 = clamp(x0 + 1, 0, (int)bw - 1);
+    int y1 = clamp(y0 + 1, 0, (int)bh - 1);
+    x0 = clamp(x0, 0, (int)bw - 1);
+    y0 = clamp(y0, 0, (int)bh - 1);
+    float b00 = BurnMapTex.Load(int3(x0, y0, 0)).r;
+    float b10 = BurnMapTex.Load(int3(x1, y0, 0)).r;
+    float b01 = BurnMapTex.Load(int3(x0, y1, 0)).r;
+    float b11 = BurnMapTex.Load(int3(x1, y1, 0)).r;
+    return lerp(lerp(b00, b10, tx), lerp(b01, b11, tx), ty);
+}
+
+float3 SolidWalls(float3 vel, int ix, int iz, int layer)
+{
+    if (ix == 0)
+        vel.x = max(vel.x, 0.0);
+    if (ix == Res - 1)
+        vel.x = min(vel.x, 0.0);
+    if (iz == 0)
+        vel.z = max(vel.z, 0.0);
+    if (iz == Res - 1)
+        vel.z = min(vel.z, 0.0);
+    // Ground is solid. The top of the volume is open.
+    if (layer == 0)
+        vel.y = max(vel.y, 0.0);
+    return vel;
+}
+
+float3 ClampSpeed(float3 vel)
+{
+    float speed = length(vel);
+    float limit = max(MaxSpeed, 0.0);
+    if (speed > limit && speed > 0.0)
+        vel *= limit / speed;
+    return vel;
+}
+
+float Hash01(uint n)
+{
+    n = (n << 13u) ^ n;
+    n = n * (n * n * 15731u + 789221u) + 1376312589u;
+    return (float)(n & 0x00ffffffu) / 16777215.0;
+}
+
+[numthreads(8, 8, 1)]
+void InitGrid(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+    int row = AtlasRow(layer, iz);
+    StateWrite[int2(ix, row)] = float4(0.0, 0.0, 0.0, AmbientTemperature);
+    PressureWrite[int2(ix, row)] = 0.0;
+    DivergenceMap[int2(ix, row)] = 0.0;
+}
+
+// Semi-Lagrangian step. Temperature is carried by the pre-step velocity,
+// which is still in StateRead while both quantities are written to StateWrite.
+[numthreads(8, 8, 1)]
+void Advect(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float3 center = CellCenter(ix, iz, layer);
+    float4 here = LoadState(ix, iz, layer);
+    float3 back = ClampDomain(center - here.xyz * DeltaTime);
+    float4 advected = SampleState(back);
+    advected.xyz = SolidWalls(advected.xyz, ix, iz, layer);
+    StateWrite[int2(ix, AtlasRow(layer, iz))] = advected;
+}
+
+[numthreads(8, 8, 1)]
+void AddForces(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float4 state = LoadState(ix, iz, layer);
+    float3 vel = state.xyz;
+    float temp = state.w;
+    float3 center = CellCenter(ix, iz, layer);
+
+    // Burn-map red channel is fire intensity. Lower layers receive more heat.
+    float burn = SampleBurn(center.xz) * HeatEnabled;
+    float layerWeight = 1.0 - ((float)layer / (float)max(Layers, 1));
+    temp += HeatSourceStrength * burn * layerWeight * DeltaTime;
+
+    // Buoyancy from excess heat. Temperature is normalized, not Kelvin.
+    vel.y += Buoyancy * (temp - AmbientTemperature) * DeltaTime;
+    vel += AmbientWind.xyz * WindCoupling * DeltaTime;
+
+    float decay = exp(-Dissipation * DeltaTime);
+    vel *= decay;
+    temp = AmbientTemperature + (temp - AmbientTemperature) * decay;
+    vel = SolidWalls(vel, ix, iz, layer);
+
+    StateWrite[int2(ix, AtlasRow(layer, iz))] = float4(vel, temp);
+}
+
+// v_new = (v + sum(alpha_axis * neighbor)) / (1 + sum(alpha_axis))
+// alpha_axis = viscosity * dt / h_axis^2. Ghost cells outside solid walls
+// copy the center sample (Neumann).
+[numthreads(8, 8, 1)]
+void DiffuseVelocity(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float4 state = LoadState(ix, iz, layer);
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    float ax = Viscosity * DeltaTime / max(dx * dx, 1e-4);
+    float ay = Viscosity * DeltaTime / max(dy * dy, 1e-4);
+    float az = Viscosity * DeltaTime / max(dz * dz, 1e-4);
+
+    float3 sum = ax * (LoadState(ix - 1, iz, layer).xyz + LoadState(ix + 1, iz, layer).xyz);
+    sum += az * (LoadState(ix, iz - 1, layer).xyz + LoadState(ix, iz + 1, layer).xyz);
+    sum += ay * (LoadState(ix, iz, layer - 1).xyz + LoadState(ix, iz, layer + 1).xyz);
+    float diag = 1.0 + 2.0 * (ax + ay + az);
+    float3 vel = SolidWalls((state.xyz + sum) / diag, ix, iz, layer);
+    StateWrite[int2(ix, AtlasRow(layer, iz))] = float4(vel, state.w);
+}
+
+[numthreads(8, 8, 1)]
+void Divergence(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    float3 l = LoadState(ix - 1, iz, layer).xyz;
+    float3 r = LoadState(ix + 1, iz, layer).xyz;
+    float3 d = LoadState(ix, iz - 1, layer).xyz;
+    float3 u = LoadState(ix, iz + 1, layer).xyz;
+    float3 b = LoadState(ix, iz, layer - 1).xyz;
+    float3 t = LoadState(ix, iz, layer + 1).xyz;
+    float div = (r.x - l.x) / (2.0 * dx) + (u.z - d.z) / (2.0 * dz) + (t.y - b.y) / (2.0 * dy);
+    DivergenceMap[int2(ix, AtlasRow(layer, iz))] = float4(div, 0.0, 0.0, 0.0);
+}
+
+// Jacobi iteration for laplacian(p) = div(u).
+// p = (sum_i neighbor_i / h_i^2 - div) / sum_i 2/h_i^2
+[numthreads(8, 8, 1)]
+void PressureJacobi(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    float ax = 1.0 / max(dx * dx, 1e-4);
+    float ay = 1.0 / max(dy * dy, 1e-4);
+    float az = 1.0 / max(dz * dz, 1e-4);
+
+    float pL = SamplePressure(ix - 1, iz, layer);
+    float pR = SamplePressure(ix + 1, iz, layer);
+    float pD = SamplePressure(ix, iz - 1, layer);
+    float pU = SamplePressure(ix, iz + 1, layer);
+    float pB = SamplePressure(ix, iz, layer - 1);
+    float pT = SamplePressure(ix, iz, layer + 1);
+    float div = DivergenceMap[int2(ix, AtlasRow(layer, iz))].x;
+    float diag = 2.0 * (ax + ay + az);
+    float pressure = (ax * (pL + pR) + az * (pD + pU) + ay * (pB + pT) - div) / diag;
+    PressureWrite[int2(ix, AtlasRow(layer, iz))] = float4(pressure, 0.0, 0.0, 0.0);
+}
+
+// Chorin's projection: u <- u - grad(p). The gradient is not multiplied by dt.
+[numthreads(8, 8, 1)]
+void SubtractGradient(uint3 id : SV_DispatchThreadID)
+{
+    int ix, iz, layer;
+    if (!Decode(id, ix, iz, layer))
+        return;
+
+    float dx = CellDx();
+    float dy = CellDy();
+    float dz = CellDz();
+    float pL = SamplePressure(ix - 1, iz, layer);
+    float pR = SamplePressure(ix + 1, iz, layer);
+    float pD = SamplePressure(ix, iz - 1, layer);
+    float pU = SamplePressure(ix, iz + 1, layer);
+    float pB = SamplePressure(ix, iz, layer - 1);
+    float pT = SamplePressure(ix, iz, layer + 1);
+
+    float4 state = LoadState(ix, iz, layer);
+    float3 vel = state.xyz;
+    vel.x -= (pR - pL) / (2.0 * dx);
+    vel.z -= (pU - pD) / (2.0 * dz);
+    vel.y -= (pT - pB) / (2.0 * dy);
+    vel = ClampSpeed(SolidWalls(vel, ix, iz, layer));
+    StateWrite[int2(ix, AtlasRow(layer, iz))] = float4(vel, state.w);
+}
+
+[numthreads(64, 1, 1)]
+void ClearParticles(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)MaxParticles)
+        return;
+    ParticlePosAge[int2((int)id.x, 0)] = float4(0.0, 0.0, 0.0, -1.0);
+    ParticleAux[int2((int)id.x, 0)] = 0.0;
+}
+
+[numthreads(64, 1, 1)]
+void SpawnParticles(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)SpawnCount || SourceCount <= 0 || MaxParticles <= 0)
+        return;
+
+    uint slot = ((uint)FrameSeed * 131u + id.x) % (uint)MaxParticles;
+    uint sourceIndex = id.x % (uint)SourceCount;
+    PlumeSourceGPU source = Sources[sourceIndex];
+    if (source.radiusMisc.w < 0.5)
+        return;
+
+    float h1 = Hash01(slot * 9781u + (uint)FrameSeed);
+    float h2 = Hash01(slot * 6271u + (uint)FrameSeed * 13u);
+    float h3 = Hash01(slot * 3119u + (uint)FrameSeed * 7u);
+    float angle = h1 * 6.2831853;
+    float radius = sqrt(h2) * max(source.radiusMisc.x, 0.5);
+    float3 pos = source.originHeat.xyz;
+    pos.x += cos(angle) * radius + (h1 - 0.5) * source.radiusMisc.z * 0.25;
+    pos.z += sin(angle) * radius + (h2 - 0.5) * source.radiusMisc.z * 0.25;
+    pos.y += h3 * max(source.radiusMisc.y, 1.0) * 0.15;
+
+    float life = ParticleLifetime * lerp(0.65, 1.0, h1);
+    float size = ParticleSize * lerp(0.6, 1.4, h2) * (0.45 + 0.55 * saturate(source.originHeat.w));
+    ParticlePosAge[int2((int)slot, 0)] = float4(pos, 0.0);
+    ParticleAux[int2((int)slot, 0)] = float4(life, size, saturate(source.originHeat.w), h3);
+}
+
+[numthreads(64, 1, 1)]
+void AdvectParticles(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)MaxParticles)
+        return;
+
+    int index = (int)id.x;
+    float4 posAge = ParticlePosAge[int2(index, 0)];
+    if (posAge.w < 0.0)
+        return;
+
+    float4 aux = ParticleAux[int2(index, 0)];
+    float3 vel = SampleState(ClampDomain(posAge.xyz)).xyz;
+    posAge.xyz += vel * DeltaTime;
+    posAge.w += DeltaTime;
+
+    float life = max(aux.x, 0.0001);
+    bool expired = posAge.w > life;
+    bool above = posAge.y > DomainHeight * 2.0;
+    bool below = posAge.y < -2.0;
+    bool outside = posAge.x < -20.0 || posAge.z < -20.0
+        || posAge.x > TerrainWidth + 20.0 || posAge.z > TerrainDepth + 20.0;
+    if (expired || above || below || outside)
+        posAge.w = -1.0;
+
+    ParticlePosAge[int2(index, 0)] = posAge;
+}
