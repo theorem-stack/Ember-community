@@ -481,7 +481,7 @@ class FirefighterEnvironment(gym.Env):
                 if current_intent:
                     intent_x, intent_y = current_intent['x'], current_intent['y']
                     current_intent['sim_x_start'], current_intent['sim_x_end'], current_intent['sim_y_start'], current_intent['sim_y_end'] = self._get_sim_coords(intent_x, intent_y)
-                
+
                 # Unity Flag: indicate that action was performed
                 current_intent['agent_applied_action'] = self.agent_applied_action[i]
 

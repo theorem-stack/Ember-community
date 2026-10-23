@@ -7,6 +7,7 @@ import onnxruntime as ort
 from AI.FirefighterEnvironment import FirefighterEnvironment
 from AI.OptionCriticAgent import OptionCriticAgent
 from QuicFire.QuicFireConstants import QuicFireConstants
+from QuicFire.QuicFireTuning import apply_document
 from QuicFire.RNGCollection import RNGCollection
 from QuicFire.QuicFireEnvGenerator import ClimateConditions
 from typing import Dict, Tuple
@@ -108,9 +109,12 @@ def setup_environment(config_filename: str ="firefighter_config.json", outputFil
     current_file_path = os.path.dirname(__file__)
     config_path = os.path.join(current_file_path, config_filename)
 
-    # 1. Load the configuration file to get model parameters
+    # 1. Load the configuration file to get model parameters.
+    # Apply allowlisted constants before total_time / DT.
     with open(config_path, 'r') as f:
-        config_data = json.load(f)['config']
+        document = json.load(f)
+    apply_document(document)
+    config_data = document['config']
     
     # Initialize environment
     climate = ClimateConditions(temperature=260, humidity=0.6, precipitation=600.0)
@@ -153,9 +157,12 @@ def setup_agent(model_filename: str = "firefighter_policy.onnx", config_filename
     model_path = os.path.join(current_file_path, model_filename)
     config_path = os.path.join(current_file_path, config_filename)
 
-    # 1. Load the configuration file to get model parameters
+    # 1. Load the configuration file to get model parameters.
+    # apply_document is idempotent if setup_environment already ran.
     with open(config_path, 'r') as f:
-        config_data = json.load(f)['config']
+        document = json.load(f)
+    apply_document(document)
+    config_data = document['config']
 
     # Replace agent's policy_net with ONNX wrapper
     policy_wrapper = load_onnx_model(model_path, config_data)
@@ -174,7 +181,7 @@ def setup_agent(model_filename: str = "firefighter_policy.onnx", config_filename
         termination_beta=0.0,
         buffer_capacity=1,  # Minimal buffer
         batch_size=1,
-        reward_alpha=config_data.get('reward_alpha', 0.8),
+        reward_alpha=config_data.get('reward_alpha', QuicFireConstants.DEFAULT_REWARD_ALPHA),
         device=_device,
         is_training=False
     )
@@ -229,6 +236,9 @@ def step_episode():
         return "episode_step_failed"
     
     return "episode_step_successful"
+
+def get_status():
+    return _done
 
 if __name__ == "__main__":
     # Relative filepaths to python root

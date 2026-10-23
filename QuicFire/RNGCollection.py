@@ -4,7 +4,7 @@ from typing import Dict, Optional
 class RNGCollection:
     """
     A collection of deterministic seeds for QuicFire modules.
-    Generates module-specific numpy.random. Generator objects on-demand for reproducible random number generation.
+    Generates module-specific numpy.random.Generator objects on-demand for reproducible random number generation.
     """
     def __init__(self, master_seed: int, initial_seeds: Optional[Dict[str, int]] = None):
         """

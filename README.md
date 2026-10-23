@@ -2,7 +2,7 @@
 
 Ember is an AI-powered wildfire training platform that combines large-scale fire behavior simulation, procedural environments, reinforcement learning agents, and XR visualization for realistic firefighter decision-making practice.
 
-It was built in five weeks: a Python fire-spread model, an option-critic firefighter with D\* Lite pathing and an Elo curriculum, ONNX export, and a Meta Quest 3 front end.
+It was built by hand in five weeks in August 2025: a Python fire-spread model, an option-critic firefighter with D\* Lite pathing and an Elo curriculum, ONNX export, and a Meta Quest 3 front end.
 
 <p align="center">
   <img src="assets/readme/Ember_HUD.png" alt="Ember XR wildfire training HUD" width="900">
@@ -56,7 +56,7 @@ Ember is a trainer for practicing wildfire decisions against a physics-style fir
 
 ### Key Components
 
-**Fire-spread engine.** Influenced by QUIC-Fire from Los Alamos National Laboratory (Linn et al., 2020). This tree is an original Python model: energy packets move on a 3D grid, fuel and moisture sit on that grid, and a wind field and plume model feed the spread. The LANL Fortran solver and the `quicfire-tools` input decks are separate projects.
+**Fire-spread engine.** Influenced by QUIC-Fire from Los Alamos National Laboratory (Linn et al., 2020). This tree is an original Python model: energy packets move on a 3D grid, fuel and moisture sit on that grid, and a wind field and a Briggs/McCaffrey plume model feed the spread. The LANL Fortran solver and the `quicfire-tools` input decks are separate projects.
 
 **Option-critic firefighter.** One network controls every agent. Each agent holds an option (a suppression type and a target cell) until the termination head ends it. D\* Lite plans movement around heat. An Elo curriculum manager rates environments against the agent.
 
@@ -106,6 +106,7 @@ Terrain and vegetation maps are generated procedurally across fuel types and ele
 │   ├── QuicFireIgnitionManager.py     # Ignition lines
 │   ├── QuicFireEnvGenerator.py        # Terrain, biomes, vegetation, fuel moisture
 │   ├── QuicFireVisualizer.py          # Fire-spread plots
+│   ├── QuicFireTuning.py              # Allowlisted overrides (time step, rewards, Briggs/McCaffrey)
 │   └── RNGCollection.py               # Per-module seeds from one master seed
 │
 ├── AI/                                # Firefighter policy
@@ -143,7 +144,7 @@ The headset scripts are under [`unity/`](unity/). See [Headset front end](#heads
 - 3D fuel density and moisture built from the vegetation map and the terrain height
 - Burnout time, heat release, and an oxygen factor that falls off with height
 - Surface, midstory, and canopy consumption accumulated by height band
-- A log-profile wind field, terrain slope, and plume updrafts
+- A log-profile wind field, terrain slope, and Briggs/McCaffrey plume rise
 - Climate inputs (temperature, humidity, precipitation) that shape moisture in the generator
 - Ignition lines and a burn box the agents are scored against
 
@@ -214,6 +215,20 @@ The script reads `QuicFireConstants.BASE_CONFIG`, trains, and writes under `Trai
 `DEFAULT_NUM_EPISODES` is `1`. A checkout run is a single episode plus an ONNX checkpoint. Raise `num_episodes` in `BASE_CONFIG` for a longer run. Checkpoints are written when the episode reward improves, every 10 episodes, and on the final episode.
 
 The agent hyperparameters used by `initialize_agent` are the `BASE_CONFIG` values: learning rate `3e-4`, gamma `0.99`, entropy beta `0.01`, termination beta `0.01`, buffer `10000`, batch `64`, reward alpha `0.8`.
+
+`main_training` takes an optional `tuning` dict and applies it before `total_time / DT`, so the episode length follows the new time step. Leave it out and every allowlisted constant stays at its default.
+
+```python
+from TrainFirefighterOptionCritic import main_training
+
+main_training(tuning={
+    "DT": 10.0,
+    "WIN_PERCENT_FUEL_BURNED_OUTSIDE_BB_THRESHOLD": 0.1,
+    "BRIGGS_RISE_COEFF": 1.8,
+})
+```
+
+`QuicFire.QuicFireTuning.apply_tuning` sets `DT`, `H_SF` (surface-fuel height, default 5.0 m), reward scales, the win threshold, and the Briggs/McCaffrey coefficients (`BRIGGS_RISE_COEFF`, `MORTON_RISE_COEFF`, `MCCAFFREY_VELOCITY_COEFF`, and the plume caps). Leaving a coefficient out keeps the desktop literal (`BRIGGS_RISE_COEFF` 1.6, `MCCAFFREY_VELOCITY_COEFF` 1.9). Packet-only names such as `PLUME_HEIGHT_FACTOR` and `PLUME_K` are ignored. `apply_document` reads a training JSON file: allowlisted `quicfire_constants`, then an optional top-level `tuning` object. `InferFirefighterOptionCritic.setup_environment` does that before it divides by `DT`.
 
 Trained weights are not part of this snapshot. `Training/`, `*.onnx`, and `*.npy` are gitignored.
 
@@ -307,22 +322,21 @@ The score is a prescribed-burn containment objective. Fuel burned inside the bur
 
 ## Headset front end
 
-The Quest 3 front end is [`unity/`](unity/). Its own notes are in [`unity/README.md`](unity/README.md).
+The Quest 3 front end lives in [`unity/`](unity/) (notes in [`unity/README.md`](unity/README.md)).
 
-That folder holds the headset scripts:
+- **GPU burn map** (`BurnMap.compute`): splats fire state from the simulation into a burn texture that drives vegetation and heat.
+- **GPU fluid smoke** (`HeadsetFluid.compute`): a 2.5D layered grid (default 64×64×4) with semi-Lagrangian advection, viscosity, heat-driven buoyancy, ambient wind forcing, dissipation, and a Jacobi pressure projection. Plume particles (`PlumeFluidParticles.shader`) are advected by this velocity field. All parameters are exposed in the Unity Inspector, sized for the Quest 3's mobile GPU.
+- **On-device inference**: `PythonInferenceBridge.cs` calls `InferFirefighterOptionCritic.py` through embedded CPython (Chaquopy). The headset loads an ONNX policy and steps the simulation offline; training stays on the desktop in `TrainFirefighterOptionCritic.py`.
+- **Packaged Python**: `unity/Assets/Python4Unity_Sample/Python` is the copy Chaquopy packages onto the headset. The repository root is the canonical source, and the two copies are kept in sync. `QuicFireEngine.py`, `QuicFireConstants.py`, and `QuicFireTuning.py` are the same file in both places: `H_SF` is 5.0 m, and plume height, tilt, vertical velocity, and turbulence come from the Briggs/McCaffrey model. The headset still reads the same JSON fields (`origin_position`, `plume_u`, `plume_v`, `plume_w`, `total_heat`, `h_sub`, `ell`, `k`). `QuicFireTuning.py` overrides the time step, `H_SF`, reward weights, the win threshold, and those Briggs/McCaffrey coefficients from code or JSON.
 
-- A GPU burn map
-- A 2.5D fluid smoke compute shader
-- Plume particles
-- `PythonInferenceBridge.cs`, the C# bridge into embedded Python
-- The Chaquopy-packaged Python copy at `unity/Assets/Python4Unity_Sample/Python`
-- `Assets/` C# and shaders, `Packages/manifest.json`, and `tests/`
+These headset-only differences remain:
 
-`PythonInferenceBridge.cs` calls `InferFirefighterOptionCritic.py`. Those hooks load an ONNX policy and step the simulation on the headset. Weight updates stay in `TrainFirefighterOptionCritic.py` on the desktop.
+- Matplotlib stays off the Quest import and step path. Training replay, reward charts, `run_fire_simulation` visualization, and the wind-field plot are commented out in the headset copy. The root still runs them. `QuicFireVisualizer.py` imports matplotlib, and the headset environment only imports the debugging plotters when `enable_viz_recorder` is true. Inference sets that flag to false.
+- The headset inference `__main__` walks the episode. The root script takes one step.
+- The root `QuicFireIgnitionManager.py` keeps a commented-out ignition plot the headset copy does not.
+- The root environment generator can write the terrain and vegetation GIF series. The headset copy's `__main__` builds one map.
 
-`unity/Assets/Python4Unity_Sample/Python` is the copy Chaquopy packages onto the headset, and it is the copy the device imports. The canonical source for the simulation, the trainer, and the inference API is this repository root (`AI/`, `QuicFire/`, and the three entry-point scripts).
-
-The Unity scene, art, and third-party packages stay out of `unity/`: Chaquopy4Unity, the Meta XR and OpenXR packages, and Asset Store packs.
+The Unity scene, art, and third-party packages (Chaquopy4Unity, Meta XR/OpenXR, Asset Store packs) are not included.
 
 ## Provenance
 
@@ -354,6 +368,11 @@ A training run and a simulation can write:
 - `UnityVisuals/environment_data.json` and `episode_data.json` when the inference `__main__` path is used
 
 Those outputs are generated artifacts. This snapshot keeps the Python source and the four figures in `assets/readme/`.
+
+## History
+
+The original simulation, RL agent, and Quest 3 app were built by hand in five weeks in August 2025.
+In October 2026 the code was cleaned up for public release and the documentation was rewritten.
 
 ## License
 

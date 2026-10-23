@@ -11,6 +11,7 @@ from typing import Dict, Optional, Tuple, List, Any
 from QuicFire.QuicFireEngine import QuicFireEngine
 from QuicFire.QuicFireBurnBox import QuicFireBurnBox
 from QuicFire.QuicFireConstants import QuicFireConstants
+from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection
 from QuicFire.QuicFireEnvGenerator import ClimateConditions, generate_realistic_environment
 from AI.DStarLite import DStarLite
@@ -25,11 +26,16 @@ class FirefighterEnvironment(gym.Env):
 
     def __init__(self, grid_size: Tuple[int, int] = (20, 20), max_steps: int = 1000, num_agents: int = 1,
                  sim_base_config: Dict = None, module_seeds: RNGCollection = None, climate: ClimateConditions = None,
-                 verbose: bool = True, enable_viz_recorder=True, enable_reward_logging: bool = True, is_training: bool = True):
+                 verbose: bool = True, enable_viz_recorder=True, enable_reward_logging: bool = True, is_training: bool = True,
+                 tuning: Optional[Dict] = None):
         """
         Initializes the FirefighterEnvironment.
         """
         super().__init__()
+        if tuning:
+            # DT for max_steps is read by the caller before this constructor.
+            # Pass tuning into the entry point as well when the step count must match.
+            apply_tuning(tuning)
         self.grid_size_x, self.grid_size_y = grid_size
         self.max_steps = max_steps
         self.num_agents = num_agents

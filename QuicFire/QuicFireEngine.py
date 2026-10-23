@@ -7,14 +7,17 @@ from QuicFire.QuicFireIgnitionManager import QuicFireIgnitionManager
 from QuicFire.QuicFireWindFieldManager import QuicFireWindFieldManager
 from QuicFire.QuicFireConstants import QuicFireConstants
 from QuicFire.QuicFireEnvGenerator import VegetationType, VEGETATION_PROPERTIES
+from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection
 from scipy.ndimage import label # Import for connected components
 
 class QuicFireEngine:
-    def __init__(self, config: Dict, veg_map: np.ndarray, fuel_map: np.ndarray, fuel_moisture_map: np.ndarray, height_map: np.ndarray, burn_box: Optional[QuicFireBurnBox]=None, wind_updates: Optional[List[Dict]]=None, ignition_lines: Optional[List[Tuple[float, float, float, float]]]=None, module_seeds: Optional[RNGCollection]=None):
+    def __init__(self, config: Dict, veg_map: np.ndarray, fuel_map: np.ndarray, fuel_moisture_map: np.ndarray, height_map: np.ndarray, burn_box: Optional[QuicFireBurnBox]=None, wind_updates: Optional[List[Dict]]=None, ignition_lines: Optional[List[Tuple[float, float, float, float]]]=None, module_seeds: Optional[RNGCollection]=None, tuning: Optional[Dict]=None):
         """
         Initializes the QuicFire simulation engine with a given configuration.
         """
+        if tuning:
+            apply_tuning(tuning)
         self.config = config if config is not None else {}
         self._validate_config_file()
 
@@ -737,34 +740,34 @@ class QuicFireEngine:
                                         np.mean(self.wind_manager.wind_v[cluster_mask])**2)
 
             # --- Plume Height (h_sub) ---
-            # Briggs neutral atmosphere, bent-over plume: h = 1.6 F^{1/3} x^{2/3} / u
+            # Briggs neutral atmosphere, bent-over plume: h = coeff * F^{1/3} x^{2/3} / u
             # Evaluate at x = fire_diameter (near-field rise, typical for visualization)
             # Ref: Briggs 1975, "Plume Rise Predictions"
-            x_ref = max(fire_diameter, 1.0)  # Avoid div0
-            if wind_speed_cluster > 0.5:  # Avoid div0 for low wind
-                h_sub_plume = 1.6 * pow(F, 1.0/3.0) * pow(x_ref, 2.0/3.0) / wind_speed_cluster
+            length_floor = QuicFireConstants.PLUME_LENGTH_FLOOR
+            x_ref = max(fire_diameter, length_floor)  # Avoid div0
+            if wind_speed_cluster > QuicFireConstants.BRIGGS_WIND_THRESHOLD:
+                h_sub_plume = QuicFireConstants.BRIGGS_RISE_COEFF * pow(F, 1.0/3.0) * pow(x_ref, 2.0/3.0) / wind_speed_cluster
             else:
                 # Low wind: Use buoyant rise ~ F^{2/5} (Morton 1956, simplified)
-                h_sub_plume = 5.0 * pow(F, 2.0/5.0)  # Constant from similarity theory
-            h_sub_plume = max(h_sub_plume, fire_diameter * 2.0)  # Minimum rise
-            h_sub_plume = min(h_sub_plume, 1000.0)  # Cap at extreme wildfire height
+                h_sub_plume = QuicFireConstants.MORTON_RISE_COEFF * pow(F, 2.0/5.0)
+            h_sub_plume = max(h_sub_plume, fire_diameter * QuicFireConstants.PLUME_MIN_RISE_DIAMETERS)
+            h_sub_plume = min(h_sub_plume, QuicFireConstants.PLUME_MAX_HEIGHT)
 
             # --- Plume Length (ell) ---
             # Horizontal projection at h_sub: x where h(x) = h_sub
-            # From Briggs: x ≈ (h * u / (1.6 F^{1/3}))^{3/2}
-            if wind_speed_cluster > 0.5:
-                ell_plume = pow(h_sub_plume * wind_speed_cluster / (1.6 * pow(F, 1.0/3.0)), 1.5)
+            # From Briggs: x ≈ (h * u / (coeff * F^{1/3}))^{3/2}
+            if wind_speed_cluster > QuicFireConstants.BRIGGS_WIND_THRESHOLD:
+                ell_plume = pow(h_sub_plume * wind_speed_cluster / (QuicFireConstants.BRIGGS_RISE_COEFF * pow(F, 1.0/3.0)), 1.5)
                 ell_plume = max(ell_plume, h_sub_plume)  # Ensure at least vertical rise
             else:
-                ell_plume = h_sub_plume * 1.1  # Minimal tilt for low wind
-            ell_plume = min(ell_plume, h_sub_plume * 5.0)  # Cap tilt at 5x height
+                ell_plume = h_sub_plume * QuicFireConstants.PLUME_CALM_TILT_FACTOR
+            ell_plume = min(ell_plume, h_sub_plume * QuicFireConstants.PLUME_MAX_TILT_FACTOR)
 
             # --- Vertical Velocity (plume_w) ---
             # Centerline velocity at z = fire_diameter: w ∝ (F / z)^{1/3} (McCaffrey 1979)
-            # Normalize to empirical constant ~1.9 (from McCaffrey pool fire data)
-            z_ref = max(fire_diameter, 1.0)  # Reference height
-            w_cl = 1.9 * pow(F / z_ref, 1.0/3.0)
-            w_cl = min(w_cl, 50.0)  # Cap at extreme wildfire velocity
+            z_ref = max(fire_diameter, length_floor)
+            w_cl = QuicFireConstants.MCCAFFREY_VELOCITY_COEFF * pow(F / z_ref, 1.0/3.0)
+            w_cl = min(w_cl, QuicFireConstants.PLUME_MAX_VERTICAL_VELOCITY)
 
             # Wind components (mean over cluster, no double-counting vertical)
             wind_u_mean_cluster = np.mean(self.wind_manager.wind_u[cluster_mask])
@@ -772,11 +775,12 @@ class QuicFireEngine:
 
             # --- Turbulence Factor (k) ---
             # Scale with Froude number: Fr = w_cl² / (g * fire_diameter)
-            # k = 0.5 + Fr contribution, capped (Morton 1956, turbulence from buoyancy)
-            fr = w_cl * w_cl / (QuicFireConstants.GRAVITY * max(fire_diameter, 1.0))
-            k_val_plume = 0.5 + 0.5 * min(fr, 2.0)  # Base + buoyancy-driven
-            k_val_plume += 0.5 * min(wind_speed_cluster / 10.0, 1.0)  # Wind shear contribution
-            k_val_plume = min(k_val_plume, 2.0)  # Reasonable turbulence range
+            # Base plus buoyancy and wind shear, then capped (Morton 1956)
+            fr = w_cl * w_cl / (QuicFireConstants.GRAVITY * max(fire_diameter, length_floor))
+            k_val_plume = QuicFireConstants.PLUME_K_BASE + QuicFireConstants.PLUME_K_FROUDE_WEIGHT * min(fr, QuicFireConstants.PLUME_K_FROUDE_CAP)
+            shear = wind_speed_cluster / QuicFireConstants.PLUME_K_SHEAR_WIND
+            k_val_plume += QuicFireConstants.PLUME_K_SHEAR_WEIGHT * min(shear, 1.0)
+            k_val_plume = min(k_val_plume, QuicFireConstants.PLUME_K_MAX)
 
             # --- Output ---
             plume_data_list.append({
