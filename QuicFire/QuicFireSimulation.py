@@ -153,6 +153,7 @@ def calibrate_simulation_params(
 
     # Get original QuicFireConstants values to restore them later
     original_constants = {attr: getattr(QuicFireConstants, attr) for attr in params_to_calibrate.keys()}
+    climate = ClimateConditions(temperature=260, humidity=0.6, precipitation=600.0)
 
     # Helper to generate parameter combinations
     def _generate_param_combinations_grid():
@@ -210,6 +211,7 @@ def calibrate_simulation_params(
             results = run_fire_simulation(
                 base_config=run_config,
                 module_seeds=module_seeds,
+                climate=climate,
                 verbose=False,
                 visualize=False
             )
@@ -272,7 +274,7 @@ def calibrate_simulation_params(
             viz_module_seeds = RNGCollection(random.randint(1, 1_000_000))
 
             try:
-                run_fire_simulation(base_config, viz_module_seeds, verbose=True, visualize=True)
+                run_fire_simulation(base_config, viz_module_seeds, climate, verbose=True, visualize=True)
             except Exception as e:
                 print(f"Failed to visualize best run: {e}")
             finally:
@@ -345,7 +347,14 @@ def stress_test_simulations(
             # Need a new RNGCollection for each stress test run to ensure different seeds
             stress_module_seeds = RNGCollection(current_seed)
 
-            results = run_fire_simulation(test_config, module_seeds=stress_module_seeds, verbose=verbose, visualize=visualize)
+            climate = ClimateConditions(temperature=260, humidity=0.6, precipitation=600.0)
+            results = run_fire_simulation(
+                test_config,
+                module_seeds=stress_module_seeds,
+                climate=climate,
+                verbose=verbose,
+                visualize=visualize,
+            )
 
             fuel_consumption = results.get('diagnostics', {}).get('consumption', {})
             total_fuel_consumed = (
@@ -410,7 +419,14 @@ def run_failed_simulation(
         # Need a new RNGCollection for this rerun
         rerun_module_rngs = RNGCollection(seed)
 
-        results = run_fire_simulation(params, module_rngs=rerun_module_rngs, verbose=verbose, visualize=visualize)
+        climate = ClimateConditions(temperature=260, humidity=0.6, precipitation=600.0)
+        results = run_fire_simulation(
+            params,
+            module_seeds=rerun_module_rngs,
+            climate=climate,
+            verbose=verbose,
+            visualize=visualize,
+        )
         print(f"Rerun of Seed {seed}: SUCCESS ✅")
         return results
     except Exception as e:
