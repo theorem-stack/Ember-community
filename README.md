@@ -33,7 +33,7 @@ QuicFireEngine          energy-packet spread, wind, plumes
 FirefighterEnvironment  observations, suppression actions, rewards, D* Lite
         |
         v
-OptionCriticAgent       desktop training (TrainFirefighterOptionCritic.py)
+OptionCriticAgent       server training (TrainFirefighterOptionCritic.py)
         |
         v
 ONNX policy             PolicyExporter.export_to_onnx
