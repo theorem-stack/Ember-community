@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import json
@@ -240,28 +241,63 @@ def step_episode():
 def get_status():
     return _done
 
-if __name__ == "__main__":
-    # Relative filepaths to python root
-    model_filename = "TrainedModels/firefighter_policy_batch_0_20250804_143554.onnx"
-    config_filename = "TrainedModels/firefighter_policy_config_20250804_143517.json"
-    output_filepath = "UnityVisuals/"
+DEFAULT_MODEL_PATH = "TrainedModels/firefighter_policy_batch_0_20250804_143554.onnx"
+DEFAULT_CONFIG_PATH = "TrainedModels/firefighter_policy_config_20250804_143517.json"
 
-    # Full paths
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run ONNX firefighter inference against a trained checkpoint."
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL_PATH,
+        help="ONNX policy. Relative paths are resolved from this script (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help="Trainer config JSON. Relative paths are resolved from this script (default: %(default)s).",
+    )
+    return parser
+
+
+def checkpoint_path(filename: str) -> str:
+    if os.path.isabs(filename):
+        return filename
+    return os.path.join(os.path.dirname(__file__), filename)
+
+
+def require_checkpoint(path: str, label: str) -> None:
+    """Exit with a clear message when a model or config file is missing."""
+    if os.path.isfile(path):
+        return
+    print(
+        f"Cannot start inference: {label} not found at {path}. "
+        "Train a checkpoint with TrainFirefighterOptionCritic.py, or pass --model and --config.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if __name__ == "__main__":
+    args = build_arg_parser().parse_args()
+    model_path = checkpoint_path(args.model)
+    config_path = checkpoint_path(args.config)
+    require_checkpoint(model_path, "model")
+    require_checkpoint(config_path, "config")
+
+    output_filepath = "UnityVisuals/"
     current_file_path = os.path.dirname(__file__)
     folder_path = os.path.join(current_file_path, output_filepath)
-
-    # Ensure save path exists
     os.makedirs(folder_path, exist_ok=True)
 
     environment_output = os.path.join(folder_path, "environment_data.json")
     episode_output = os.path.join(folder_path, "episode_data.json")
 
-    # Use global variables for data passing without C# implementation
-    setup_environment(config_filename, environment_output)
-    setup_agent(model_filename, config_filename)
+    setup_environment(config_path, environment_output)
+    setup_agent(model_path, config_path)
     setup_episode(episode_output)
 
-    # Loop step through the episode
-    # while not _done:
+    # One step. The headset copy walks the whole episode.
     step_episode()
     print("step")

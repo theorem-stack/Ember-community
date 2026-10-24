@@ -1,0 +1,23 @@
+name: pytest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+      # Torch is not installed. tests/test_entrypoint_contracts.py skips the
+      # import check that needs it, with the marker "torch-dependent".
+      - name: Test the canonical Python
+        run: pytest -q tests
+      - name: Test the headset Python copy
+        run: pytest -q unity/tests

@@ -3,7 +3,8 @@ import numpy as np
 import torch
 from typing import List, Dict, Tuple, Optional
 from AI.FirefighterEnvironment import FirefighterEnvironment
-from AI.OptionCriticAgent import OptionCriticAgent, save_config_to_file, save_checkpoint
+from AI.OptionCriticAgent import OptionCriticAgent
+from TrainFirefighterOptionCritic import save_config_to_file, save_checkpoint
 from QuicFire.QuicFireConstants import QuicFireConstants
 from QuicFire.QuicFireTuning import apply_tuning
 from QuicFire.RNGCollection import RNGCollection

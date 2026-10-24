@@ -1,11 +1,13 @@
 # Ember
 
+[![pytest](https://github.com/theorem-stack/Ember-community/actions/workflows/pytest.yml/badge.svg)](https://github.com/theorem-stack/Ember-community/actions/workflows/pytest.yml)
+
 Ember is an AI-powered wildfire training platform that combines large-scale fire behavior simulation, procedural environments, reinforcement learning agents, and XR visualization for realistic firefighter decision-making practice.
 
 It was built by hand in five weeks in August 2025: a Python fire-spread model, an option-critic firefighter with D\* Lite pathing and an Elo curriculum, ONNX export, and a Meta Quest 3 front end.
 
 <p align="center">
-  <img src="assets/readme/Ember_HUD.png" alt="Ember XR wildfire training HUD" width="900">
+  <img src="assets/readme/Ember_HUD.webp" alt="Ember XR wildfire training HUD" width="900">
 </p>
 
 <p align="center">
@@ -13,11 +15,163 @@ It was built by hand in five weeks in August 2025: a Python fire-spread model, a
 </p>
 
 <p align="center">
-  <a href="#architecture">Architecture</a> |
   <a href="#system-visuals">System Visuals</a> |
   <a href="#how-to-run">How to Run</a> |
+  <a href="#architecture">Architecture</a> |
   <a href="#headset-front-end">Headset</a>
 </p>
+
+## System Visuals
+
+The figures below were made for this project: a headset HUD screenshot, a top-down training replay, and the procedural map animations produced by `QuicFireEnvGenerator.py`.
+
+### AI Firefighter Training
+
+<p align="center">
+  <img src="assets/readme/AI_Training_60.webp" alt="Multi-agent AI firefighter training replay" width="760">
+</p>
+
+The replay is a top-down view of the training environment. Several agents pick suppression actions, walk the grid, and work a simulated fire.
+
+### Procedural Environment Generation
+
+| Terrain Elevation | Vegetation and Fuel Types |
+| --- | --- |
+| <img src="assets/readme/terrain_animation.webp" alt="Procedural terrain elevation animation" width="420"> | <img src="assets/readme/vegetation_animation.webp" alt="Procedural vegetation map animation" width="420"> |
+
+Terrain and vegetation maps are generated procedurally across fuel types and elevation.
+
+### Figures included with this snapshot
+
+| File | What it is |
+| --- | --- |
+| `assets/readme/Ember_HUD.webp` | Headset HUD screenshot, 2000×928 |
+| `assets/readme/AI_Training_60.webp` | Training replay, 800×703, 300 frames |
+| `assets/readme/terrain_animation.webp` | Procedural elevation series, 15 frames |
+| `assets/readme/vegetation_animation.webp` | Procedural vegetation series, 15 frames |
+
+## How to Run
+
+### Installation
+
+Python 3.8+ . Training uses CUDA when `torch.cuda.is_available()` is true, and otherwise stays on CPU.
+
+```bash
+git clone https://github.com/theorem-stack/Ember-community.git
+cd Ember-community
+pip install -r requirements.txt
+```
+
+Pinned in `requirements.txt`:
+
+```
+gymnasium==1.2.0
+matplotlib==3.10.3
+scikit-image==0.25.2
+numpy==1.26.4
+scipy==1.16.0
+torch==2.6.0
+onnx==1.18.0
+onnxruntime==1.22.1
+```
+
+Regenerating the terrain and vegetation GIFs (`create_gifs_from_images` in `QuicFireEnvGenerator.py`) imports Pillow, which is outside `requirements.txt`. The simulation, trainer, and inference script import the packages listed above.
+
+`pytest` runs the checks under `tests/` and `unity/tests/`. The workflow above installs pytest only. The one test that imports the trainer is marked `torch-dependent` and skips unless CPU torch and `requirements.txt` are installed.
+
+### Fire simulation
+
+```bash
+python QuicFireMain.py
+```
+
+This builds one generated scenario from `QuicFireConstants.DEFAULT_RANDOM_SEED` and runs it. `run_fire_simulation` visualizes by default, so Matplotlib needs a display or a non-interactive backend.
+
+Stress testing and calibration are `stress_test_simulations` and `calibrate_simulation_params` in `QuicFire/QuicFireSimulation.py`. The calls in `QuicFireMain.py` are commented out. Those helpers pass `ClimateConditions(temperature=260, humidity=0.6, precipitation=600.0)` into `run_fire_simulation`, the same climate the trainer and the inference script use.
+
+### Train
+
+```bash
+python TrainFirefighterOptionCritic.py
+```
+
+The script reads `QuicFireConstants.BASE_CONFIG`, trains, and writes under `Training/` (created next to the script):
+
+- `firefighter_policy_config_<timestamp>.json`
+- `firefighter_policy_batch_<episode>_<timestamp>.onnx`
+- `firefighter_log.txt` (episode, reward)
+- `reward_plots/` when reward logging is on
+
+`DEFAULT_NUM_EPISODES` is `1`. A checkout run is a single episode plus an ONNX checkpoint. Raise `num_episodes` in `BASE_CONFIG` for a longer run. Checkpoints are written when the episode reward improves, every 10 episodes, and on the final episode.
+
+The agent hyperparameters used by `initialize_agent` are the `BASE_CONFIG` values: learning rate `3e-4`, gamma `0.99`, entropy beta `0.01`, termination beta `0.01`, buffer `10000`, batch `64`, reward alpha `0.8`.
+
+`main_training` takes an optional `tuning` dict and applies it before `total_time / DT`, so the episode length follows the new time step. Leave it out and every allowlisted constant stays at its default.
+
+```python
+from TrainFirefighterOptionCritic import main_training
+
+main_training(tuning={
+    "DT": 10.0,
+    "WIN_PERCENT_FUEL_BURNED_OUTSIDE_BB_THRESHOLD": 0.1,
+    "BRIGGS_RISE_COEFF": 1.8,
+})
+```
+
+`QuicFire.QuicFireTuning.apply_tuning` sets `DT`, `H_SF` (surface-fuel height, default 5.0 m), reward scales, the win threshold, and the Briggs/McCaffrey coefficients (`BRIGGS_RISE_COEFF`, `MORTON_RISE_COEFF`, `MCCAFFREY_VELOCITY_COEFF`, and the plume caps). Leaving a coefficient out keeps the desktop literal (`BRIGGS_RISE_COEFF` 1.6, `MCCAFFREY_VELOCITY_COEFF` 1.9). Packet-only names such as `PLUME_HEIGHT_FACTOR` and `PLUME_K` are ignored. `apply_document` reads a training JSON file: allowlisted `quicfire_constants`, then an optional top-level `tuning` object. `InferFirefighterOptionCritic.setup_environment` does that before it divides by `DT`.
+
+Trained weights are not part of this snapshot. `Training/`, `*.onnx`, and `*.npy` are gitignored.
+
+### Inference
+
+```bash
+python InferFirefighterOptionCritic.py \
+  --model TrainedModels/firefighter_policy_batch_0_20250804_143554.onnx \
+  --config TrainedModels/firefighter_policy_config_20250804_143517.json
+```
+
+`--model` and `--config` default to those paths, resolved relative to the script. If either file is missing, the script exits and prints the path it could not open. Train a checkpoint with `TrainFirefighterOptionCritic.py`, or pass the flags for a checkpoint you already have.
+
+`setup_environment`, `setup_agent`, `setup_episode`, and `step_episode` are the hooks the headset calls. The root `__main__` takes one step. Each step overwrites the episode JSON with the latest `viz_data` payload (fires, embers, plumes, agents, heat flux).
+
+```python
+from QuicFire.QuicFireEnvGenerator import ClimateConditions
+from QuicFire.QuicFireSimulation import run_fire_simulation
+from QuicFire.RNGCollection import RNGCollection
+
+base_config = {
+    'nx': 100, 'ny': 100, 'nz': 50,
+    'dx': 2, 'dy': 2,
+    'total_time': 10000,
+    'random_seed': 12243261,
+}
+
+climate = ClimateConditions(
+    temperature=260,      # Kelvin
+    humidity=0.6,
+    precipitation=600.0   # mm/year
+)
+
+module_seeds = RNGCollection(base_config['random_seed'])
+results = run_fire_simulation(base_config, module_seeds, climate, visualize=True)
+```
+
+```python
+from AI.FirefighterEnvironment import FirefighterEnvironment
+
+env = FirefighterEnvironment(
+    grid_size=(20, 20),
+    max_steps=1000,
+    num_agents=4,
+    sim_base_config=base_config,
+    module_seeds=module_seeds,
+    climate=climate,
+)
+```
+
+`FirefighterEnvironment` subclasses `gymnasium.Env`. `step` returns `(observation, per_agent_rewards, done, info)`.
+
+Grid keys, observation channels, actions, and the reward terms are in [docs/reference.md](docs/reference.md).
 
 ## Architecture
 
@@ -64,35 +218,6 @@ Ember is a trainer for practicing wildfire decisions against a physics-style fir
 
 **ONNX deployment.** Training writes the policy with `PolicyExporter`. The inference module runs that file through ONNX Runtime.
 
-## System Visuals
-
-The figures below were made for this project: a headset HUD screenshot, a top-down training replay, and the procedural map animations produced by `QuicFireEnvGenerator.py`.
-
-### AI Firefighter Training
-
-<p align="center">
-  <img src="assets/readme/AI_Training_60.gif" alt="Multi-agent AI firefighter training replay" width="760">
-</p>
-
-The replay is a top-down view of the training environment. Several agents pick suppression actions, walk the grid, and work a simulated fire.
-
-### Procedural Environment Generation
-
-| Terrain Elevation | Vegetation and Fuel Types |
-| --- | --- |
-| <img src="assets/readme/terrain_animation.gif" alt="Procedural terrain elevation animation" width="420"> | <img src="assets/readme/vegetation_animation.gif" alt="Procedural vegetation map animation" width="420"> |
-
-Terrain and vegetation maps are generated procedurally across fuel types and elevation.
-
-### Figures included with this snapshot
-
-| File | What it is |
-| --- | --- |
-| `assets/readme/Ember_HUD.png` | Headset HUD screenshot, 2706×1256 |
-| `assets/readme/AI_Training_60.gif` | Training replay, 800×703, 300 frames |
-| `assets/readme/terrain_animation.gif` | Procedural elevation series, 15 frames |
-| `assets/readme/vegetation_animation.gif` | Procedural vegetation series, 15 frames |
-
 ## Repository Map
 
 ```
@@ -127,10 +252,12 @@ Terrain and vegetation maps are generated procedurally across fuel types and ele
 │   ├── Packages/manifest.json
 │   └── tests/
 │
+├── docs/reference.md                  # Config, observation, action, and reward reference
 ├── TrainFirefighterOptionCritic.py    # Desktop training entry point
 ├── InferFirefighterOptionCritic.py    # ONNX inference entry point (headset hooks)
 ├── QuicFireMain.py                    # Standalone simulation
 ├── requirements.txt
+├── tests/
 └── assets/readme/                     # Figures above
 ```
 
@@ -158,167 +285,9 @@ The headset scripts are under [`unity/`](unity/). See [Headset front end](#heads
 - Elo curriculum: environment pool, burn-in, and rating updates in `AI/EloCurriculumManager.py`
 - ONNX export of the four network heads
 
-The trainer that matches the current network is `TrainFirefighterOptionCritic.py`. The Elo manager is a separate module with its own `__main__`. That block is behind the agent it was written against: it imports `save_config_to_file` and `save_checkpoint` from `OptionCriticAgent` (those functions are defined in `TrainFirefighterOptionCritic.py`), it constructs `OptionCriticAgent` with an `env_template` argument the current constructor has no parameter for, and its episode loop unpacks an older network and `step` signature. Treat that file as the curriculum design. Run training through `TrainFirefighterOptionCritic.py`.
+The trainer that matches the current network is `TrainFirefighterOptionCritic.py`. `AI/EloCurriculumManager.py` saves its config and checkpoints with `save_config_to_file` and `save_checkpoint` from that trainer. Its `__main__` curriculum loop still constructs `OptionCriticAgent` with an `env_template` argument the current constructor does not take, and the episode loop unpacks an older network and `step` signature. Run training through `TrainFirefighterOptionCritic.py`.
 
 `PolicyExporter.export_to_onnx` is the path the trainer uses. `PolicyExporter.extract_policy_inference_model` still looks for separate `target_x_head` and `target_y_head` attributes. The network exposes `target_xy_head` instead.
-
-## Installation
-
-Python 3.8+ . Training uses CUDA when `torch.cuda.is_available()` is true, and otherwise stays on CPU.
-
-```bash
-git clone https://github.com/theorem-stack/Ember-community.git
-cd Ember-community
-pip install -r requirements.txt
-```
-
-Pinned in `requirements.txt`:
-
-```
-gymnasium==1.2.0
-matplotlib==3.10.3
-scikit-image==0.25.2
-numpy==1.26.4
-scipy==1.16.0
-torch==2.6.0
-onnx==1.18.0
-onnxruntime==1.22.1
-```
-
-Regenerating the terrain and vegetation GIFs (`create_gifs_from_images` in `QuicFireEnvGenerator.py`) imports Pillow, which is outside `requirements.txt`. The simulation, trainer, and inference script import the packages listed above.
-
-## How to Run
-
-### Fire simulation
-
-```bash
-python QuicFireMain.py
-```
-
-This builds one generated scenario from `QuicFireConstants.DEFAULT_RANDOM_SEED` and runs it. `run_fire_simulation` visualizes by default, so Matplotlib needs a display or a non-interactive backend.
-
-Stress testing and calibration are implemented as `stress_test_simulations` and `calibrate_simulation_params` in `QuicFire/QuicFireSimulation.py`. The calls in `QuicFireMain.py` are commented out. `run_failed_simulation` in that module still invokes `run_fire_simulation` with a `module_rngs` keyword and no climate argument. The live signature is `run_fire_simulation(base_config, module_seeds, climate, verbose=True, visualize=True)`.
-
-### Train
-
-```bash
-python TrainFirefighterOptionCritic.py
-```
-
-The script reads `QuicFireConstants.BASE_CONFIG`, trains, and writes under `Training/` (created next to the script):
-
-- `firefighter_policy_config_<timestamp>.json`
-- `firefighter_policy_batch_<episode>_<timestamp>.onnx`
-- `firefighter_log.txt` (episode, reward)
-- `reward_plots/` when reward logging is on
-
-`DEFAULT_NUM_EPISODES` is `1`. A checkout run is a single episode plus an ONNX checkpoint. Raise `num_episodes` in `BASE_CONFIG` for a longer run. Checkpoints are written when the episode reward improves, every 10 episodes, and on the final episode.
-
-The agent hyperparameters used by `initialize_agent` are the `BASE_CONFIG` values: learning rate `3e-4`, gamma `0.99`, entropy beta `0.01`, termination beta `0.01`, buffer `10000`, batch `64`, reward alpha `0.8`.
-
-`main_training` takes an optional `tuning` dict and applies it before `total_time / DT`, so the episode length follows the new time step. Leave it out and every allowlisted constant stays at its default.
-
-```python
-from TrainFirefighterOptionCritic import main_training
-
-main_training(tuning={
-    "DT": 10.0,
-    "WIN_PERCENT_FUEL_BURNED_OUTSIDE_BB_THRESHOLD": 0.1,
-    "BRIGGS_RISE_COEFF": 1.8,
-})
-```
-
-`QuicFire.QuicFireTuning.apply_tuning` sets `DT`, `H_SF` (surface-fuel height, default 5.0 m), reward scales, the win threshold, and the Briggs/McCaffrey coefficients (`BRIGGS_RISE_COEFF`, `MORTON_RISE_COEFF`, `MCCAFFREY_VELOCITY_COEFF`, and the plume caps). Leaving a coefficient out keeps the desktop literal (`BRIGGS_RISE_COEFF` 1.6, `MCCAFFREY_VELOCITY_COEFF` 1.9). Packet-only names such as `PLUME_HEIGHT_FACTOR` and `PLUME_K` are ignored. `apply_document` reads a training JSON file: allowlisted `quicfire_constants`, then an optional top-level `tuning` object. `InferFirefighterOptionCritic.setup_environment` does that before it divides by `DT`.
-
-Trained weights are not part of this snapshot. `Training/`, `*.onnx`, and `*.npy` are gitignored.
-
-### Inference
-
-`InferFirefighterOptionCritic.py` expects a policy and a config the trainer already wrote. The `__main__` block points at:
-
-- `TrainedModels/firefighter_policy_batch_0_20250804_143554.onnx`
-- `TrainedModels/firefighter_policy_config_20250804_143517.json`
-
-This branch ships source, so point `setup_agent` and `setup_environment` at a checkpoint you trained, then call `setup_episode` and `step_episode`. Each step appends nothing: it overwrites the episode JSON with the latest `viz_data` payload (fires, embers, plumes, agents, heat flux).
-
-```python
-from QuicFire.QuicFireEnvGenerator import ClimateConditions
-from QuicFire.QuicFireSimulation import run_fire_simulation
-from QuicFire.RNGCollection import RNGCollection
-
-base_config = {
-    'nx': 100, 'ny': 100, 'nz': 50,
-    'dx': 2, 'dy': 2,
-    'total_time': 10000,
-    'random_seed': 12243261,
-}
-
-climate = ClimateConditions(
-    temperature=260,      # Kelvin
-    humidity=0.6,
-    precipitation=600.0   # mm/year
-)
-
-module_seeds = RNGCollection(base_config['random_seed'])
-results = run_fire_simulation(base_config, module_seeds, climate, visualize=True)
-```
-
-```python
-from AI.FirefighterEnvironment import FirefighterEnvironment
-
-env = FirefighterEnvironment(
-    grid_size=(20, 20),
-    max_steps=1000,
-    num_agents=4,
-    sim_base_config=base_config,
-    module_seeds=module_seeds,
-    climate=climate,
-)
-```
-
-`FirefighterEnvironment` subclasses `gymnasium.Env`. `step` returns `(observation, per_agent_rewards, done, info)`.
-
-## Configuration
-
-`QuicFireConstants.BASE_CONFIG` is the dictionary the trainer uses:
-
-| Key | Default | Role |
-| --- | --- | --- |
-| `nx`, `ny`, `nz` | 100, 100, 50 | Simulation grid |
-| `dx`, `dy` | 2 m | Horizontal cell size |
-| `max_grid_height` | 300 m | Top of the vertical grid |
-| `max_elevation` | 50 m | Terrain generator cap |
-| `total_time` | 10000 s | Episode horizon |
-| `num_episodes` | 1 | Trainer episodes |
-| `obs_grid_x`, `obs_grid_y` | 20, 20 | Agent observation grid |
-| `num_agents` | 4 | Firefighters on the shared policy |
-| `random_seed` | 12243261 | Master seed |
-
-## Observation Space
-
-The observation is a float32 box of shape `(obs_grid_x, obs_grid_y, 9)`, default `(20, 20, 9)`. The network permutes that to channels-first before the convolutions.
-
-| Channel | Name |
-| --- | --- |
-| 0 | `heat_flux` |
-| 1 | `energy_packets` |
-| 2 | `temperature` |
-| 3 | `fuel_density` |
-| 4 | `moisture_fraction` |
-| 5 | `wind_magnitude` |
-| 6 | `agent_positions` |
-| 7 | `burn_box` |
-| 8 | `placeholder` |
-
-## Action Space
-
-`select_and_execute_options` returns one row per agent: `[agent_idx, action_type, x, y]`, with `x` and `y` on the observation grid. The environment consumes that array in `step`.
-
-Agents spend finite water, retardant, and air-support charges. A firebreak has no resource cost. Ranges and capacities are the `WATER_*`, `RETARDANT_*`, `AIR_SUPPORT_*`, and `FIREBREAK_*` constants in `QuicFireConstants.py`.
-
-## Reward
-
-The score is a prescribed-burn containment objective. Fuel burned inside the burn box is rewarded. Active fire and fuel loss outside the box are penalized, along with water, retardant, air support, time, invalid actions, and movement. A contained mission and a fire that escapes or times out use the mission constants in `QuicFireConstants`. Per-agent reward is blended with the global reward by `reward_alpha` (default 0.8).
 
 ## Headset front end
 
