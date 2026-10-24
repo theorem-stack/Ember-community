@@ -33,7 +33,7 @@ QuicFireEngine          energy-packet spread, wind, plumes
 FirefighterEnvironment  observations, suppression actions, rewards, D* Lite
         |
         v
-OptionCriticAgent       server training (TrainFirefighterOptionCritic.py)
+OptionCriticAgent       server training run (TrainFirefighterOptionCritic.py)
         |
         v
 ONNX policy             PolicyExporter.export_to_onnx
@@ -44,7 +44,7 @@ InferFirefighterOptionCritic.py
         |
         v
 unity/                  Quest 3 front end
-                        GPU burn map, 2.5D fluid smoke, plume particles
+                        GPU burn map, 2.5D fluid dynamics, plume particles
                         PythonInferenceBridge.cs calls the packaged Python
 ```
 
@@ -325,7 +325,7 @@ The score is a prescribed-burn containment objective. Fuel burned inside the bur
 The Quest 3 front end lives in [`unity/`](unity/) (notes in [`unity/README.md`](unity/README.md)).
 
 - **GPU burn map** (`BurnMap.compute`): splats fire state from the simulation into a burn texture that drives vegetation and heat.
-- **GPU fluid smoke** (`HeadsetFluid.compute`): a 2.5D layered grid (default 64×64×4) with semi-Lagrangian advection, viscosity, heat-driven buoyancy, ambient wind forcing, dissipation, and a Jacobi pressure projection. Plume particles (`PlumeFluidParticles.shader`) are advected by this velocity field. All parameters are exposed in the Unity Inspector, sized for the Quest 3's mobile GPU.
+- **GPU fluid dynamics** (`HeadsetFluid.compute`): a 2.5D layered grid (default 64×64×4) with semi-Lagrangian advection, viscosity, heat-driven buoyancy, ambient wind forcing, dissipation, and a Jacobi pressure projection. Plume particles (`PlumeFluidParticles.shader`) are advected by this velocity field. All parameters are exposed in the Unity Inspector, sized for the Quest 3's mobile GPU.
 - **On-device inference**: `PythonInferenceBridge.cs` calls `InferFirefighterOptionCritic.py` through embedded CPython (Chaquopy). The headset loads an ONNX policy and steps the simulation offline; training stays on the desktop in `TrainFirefighterOptionCritic.py`.
 - **Packaged Python**: `unity/Assets/Python4Unity_Sample/Python` is the copy Chaquopy packages onto the headset. The repository root is the canonical source, and the two copies are kept in sync. `QuicFireEngine.py`, `QuicFireConstants.py`, and `QuicFireTuning.py` are the same file in both places: `H_SF` is 5.0 m, and plume height, tilt, vertical velocity, and turbulence come from the Briggs/McCaffrey model. The headset still reads the same JSON fields (`origin_position`, `plume_u`, `plume_v`, `plume_w`, `total_heat`, `h_sub`, `ell`, `k`). `QuicFireTuning.py` overrides the time step, `H_SF`, reward weights, the win threshold, and those Briggs/McCaffrey coefficients from code or JSON.
 
